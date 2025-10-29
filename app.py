@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="Predictive Maintenance Dashboard", layout="wide")
 
 st.title("🧠 Predictive Maintenance Dashboard")
-st.markdown("**By Juan Rojas | Dual Model: Classification (Failure) + Regression (MTBF)**")
+st.markdown("**By Juan Diaz | Dual Model: Classification (Failure) + Regression (MTBF)**")
 
 # ====== 2️⃣ LOAD MODELS & METADATA ======
 @st.cache_resource
@@ -53,7 +53,7 @@ def user_input_features(features):
 
 if mode.startswith("Classification"):
     st.subheader("Model: Machine Failure Prediction")
-    st.write("Predict whether a failure will occur under given conditions.")
+    st.write("Predict whether a failure will occur within 30 days under given conditions.")
     X_input = user_input_features(features_cls)
 
     if st.button("🔍 Predict Failure"):
