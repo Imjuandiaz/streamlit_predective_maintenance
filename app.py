@@ -83,4 +83,4 @@ else:
 
 # ====== 5️⃣ FOOTER ======
 st.markdown("---")
-st.caption("Built with ❤️ using Streamlit, Scikit-learn, and PyCaret concepts")
+st.caption("Built in python using Streamlit, Scikit-learn, PyCaret, and Machine Learning concepts")
