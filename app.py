@@ -7,80 +7,342 @@ Original file is located at
     https://colab.research.google.com/drive/1w6vkfh79CZJ_k9dd1niGioA2iDeeeGWx
 """
 
-# app.py
-import streamlit as st
-import pandas as pd
+# app_enhanced.py
+# Predictive Maintenance Dashboard - Enhanced version
+# By Juan Díaz (enhanced)
+# Replaces / extends original app.py: adds metrics, input validation, CSV batch, survival note, improved plots
+
+import os
 import json
 import joblib
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import streamlit as st
 import matplotlib.pyplot as plt
+import io
+import math
+from datetime import datetime
 
-# ====== 1️⃣ PAGE CONFIG ======
+from sklearn.metrics import (
+    f1_score, precision_recall_curve, average_precision_score,
+    confusion_matrix, classification_report,
+    mean_absolute_error, mean_squared_error, r2_score
+)
+
+# ====== CONFIG ======
 st.set_page_config(page_title="Predictive Maintenance Dashboard", layout="wide")
-
 st.title("🧠 Predictive Maintenance Dashboard")
-st.markdown("**By Juan Diaz | Dual Model: Classification (Failure) + Regression (MTBF)**")
+st.markdown("**By Juan Díaz | Dual Model: Classification (Failure) + Regression (MTBF)**")
+ARTIFACTS_DIR = Path("artifacts")
 
-# ====== 2️⃣ LOAD MODELS & METADATA ======
+# ====== UTIL: load artifacts safely ======
 @st.cache_resource
 def load_artifacts():
-    models = {
-        "classifier": joblib.load("artifacts/model_failure_classifier.pkl"),
-        "regressor": joblib.load("artifacts/model_mtbf_randomforest.pkl")
-    }
-    with open("artifacts/features_classifier.json") as f:
-        features_cls = json.load(f)
-    with open("artifacts/features_mtbf.json") as f:
-        features_reg = json.load(f)
+    out = {}
+    # models
+    try:
+        out['clf'] = joblib.load(ARTIFACTS_DIR / "model_failure_classifier.pkl")
+    except Exception as e:
+        out['clf'] = None
+        st.error(f"Warning: cannot load classifier model: {e}")
+    try:
+        out['reg'] = joblib.load(ARTIFACTS_DIR / "model_mtbf_randomforest.pkl")
+    except Exception as e:
+        out['reg'] = None
+        st.error(f"Warning: cannot load regressor model: {e}")
+    # features
+    try:
+        out['features_cls'] = json.load(open(ARTIFACTS_DIR / "features_classifier.json"))
+    except Exception:
+        out['features_cls'] = None
+    try:
+        out['features_reg'] = json.load(open(ARTIFACTS_DIR / "features_mtbf.json"))
+    except Exception:
+        out['features_reg'] = None
+    # importances
+    try:
+        out['imp_cls'] = pd.read_csv(ARTIFACTS_DIR / "feature_importances_classifier.csv", index_col=0)
+    except Exception:
+        out['imp_cls'] = None
+    try:
+        out['imp_reg'] = pd.read_csv(ARTIFACTS_DIR / "feature_importances_mtbf.csv", index_col=0)
+    except Exception:
+        out['imp_reg'] = None
+    # clean data (optional)
+    try:
+        out['clean_data'] = pd.read_csv(ARTIFACTS_DIR / "clean_data.csv")
+    except Exception:
+        out['clean_data'] = None
+    return out
 
-    importances_cls = pd.read_csv("artifacts/feature_importances_classifier.csv", index_col=0)
-    importances_reg = pd.read_csv("artifacts/feature_importances_mtbf.csv", index_col=0)
-    return models, features_cls, features_reg, importances_cls, importances_reg
+ARTS = load_artifacts()
 
-models, features_cls, features_reg, imp_cls, imp_reg = load_artifacts()
+# ====== HELPERS ======
+def plot_feature_importances(df_imp, title="Feature importances"):
+    if df_imp is None:
+        st.write("No feature importances found.")
+        return
+    # ensure series
+    if isinstance(df_imp, pd.DataFrame):
+        try:
+            ser = df_imp.iloc[:,0]
+        except Exception:
+            ser = pd.Series(df_imp.values.flatten(), index=df_imp.index)
+    else:
+        ser = pd.Series(df_imp)
+    ser = ser.sort_values(ascending=True)
+    fig, ax = plt.subplots(figsize=(6, max(3, 0.3*len(ser))))
+    ser.plot(kind='barh', ax=ax)
+    ax.set_title(title)
+    ax.set_xlabel("Importance")
+    ax.grid(axis='x', linestyle='--', alpha=0.4)
+    plt.tight_layout()
+    st.pyplot(fig)
 
-# ====== 3️⃣ SIDEBAR MODE SELECTION ======
+def infer_ranges_from_df(clean_df, features):
+    ranges = {}
+    if clean_df is None:
+        # some sensible defaults
+        for f in features:
+            ranges[f] = (0.0, 100.0, 0.1, 0.0)  # min,max,step,default
+        return ranges
+    for f in features:
+        if f in clean_df.columns:
+            col = clean_df[f].dropna().astype(float)
+            if len(col)>0:
+                mn, mx = float(col.min()), float(col.max())
+                step = max((mx-mn)/100.0, 0.01)
+                default = float(col.median())
+                ranges[f] = (mn, mx, step, default)
+            else:
+                ranges[f] = (0.0, 100.0, 0.1, 0.0)
+        else:
+            ranges[f] = (0.0, 100.0, 0.1, 0.0)
+    return ranges
+
+def build_input_form(features, clean_df=None):
+    st.sidebar.header("🔧 Input parameters")
+    inputs = {}
+    ranges = infer_ranges_from_df(clean_df, features)
+    for feat in features:
+        mn, mx, step, default = ranges.get(feat, (0.0, 100.0, 0.1, 0.0))
+        try:
+            val = st.sidebar.number_input(f"{feat} ({mn:.2f}–{mx:.2f})", value=float(default), min_value=mn, max_value=mx, step=float(step), format="%.3f")
+        except Exception:
+            val = st.sidebar.number_input(f"{feat}", value=0.0, step=0.1, format="%.3f")
+        inputs[feat] = val
+    return pd.DataFrame([inputs])
+
+def show_prediction_note_reg(pred_minutes):
+    hours = pred_minutes/60.0
+    days = pred_minutes/1440.0
+    st.markdown("### 📘 Interpretación de la predicción (Regresión)")
+    st.write(f"- Estimated time until failure: **{pred_minutes:.1f} minutes** ({hours:.1f} hours, {days:.2f} days).")
+    mean = max(pred_minutes, 1.0)
+    t_points = np.array([60, 60*24, 60*24*7])
+    probs = np.exp(-t_points/mean)
+    st.write("- Approx. survival probability (simple exp. model):")
+    st.write(f"  - After 1 hour: {probs[0]*100:.1f}%")
+    st.write(f"  - After 1 day: {probs[1]*100:.1f}%")
+    st.write(f"  - After 7 days: {probs[2]*100:.1f}%")
+    st.caption("Nota: esto es una aproximación simple. Para curvas de supervivencia precisas hay que modelar tiempos históricos.")
+
+def show_prediction_note_cls(prob_pos, pred_class):
+    st.markdown("### 📘 Interpretación de la predicción (Clasificación)")
+    st.write(f"- Predicted class: **{'Failure' if pred_class==1 else 'No Failure'}**")
+    st.write(f"- Probability of failure: **{prob_pos*100:.2f}%**")
+    if prob_pos >= 0.7:
+        st.warning("⚠️ High probability of failure — recommend inspection.")
+    elif prob_pos >= 0.3:
+        st.info("🟡 Medium risk — monitor and consider preventive measures.")
+    else:
+        st.success("✅ Low risk — normal conditions.")
+
+def batch_predict_and_download(model, features, uploaded_file, is_classification=True):
+    if uploaded_file is None:
+        st.info("Upload a CSV with the feature columns to run batch predictions.")
+        return
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error("Error reading CSV: " + str(e))
+        return
+    missing = [c for c in features if c not in df.columns]
+    if missing:
+        st.error(f"The CSV is missing required columns: {missing}")
+        return
+    X = df[features]
+    preds = model.predict(X)
+    if is_classification:
+        if hasattr(model, "predict_proba"):
+            probs = model.predict_proba(X)
+            df["pred_prob_pos"] = probs[:,1]
+        df["pred"] = preds
+    else:
+        df["pred_minutes"] = preds
+        df["pred_hours"] = df["pred_minutes"]/60.0
+    st.dataframe(df.head(20))
+    csv_out = df.to_csv(index=False).encode('utf-8')
+    st.download_button("Download predictions CSV", data=csv_out, file_name="predictions.csv", mime="text/csv")
+
+def show_trends_if_available(clean_df):
+    if clean_df is None:
+        st.info("No historical data found for trends.")
+        return
+    time_cols = [c for c in clean_df.columns if 'time' in c.lower() or 'date' in c.lower() or 'timestamp' in c.lower()]
+    if not time_cols:
+        st.info("No timestamp column found in clean_data.csv to show trends.")
+        return
+    tcol = time_cols[0]
+    df = clean_df.copy()
+    df[tcol] = pd.to_datetime(df[tcol], errors='coerce')
+    df = df.dropna(subset=[tcol])
+    df = df.sort_values(tcol)
+    if 'Tool wear [min]' in df.columns:
+        fig, ax = plt.subplots()
+        ax.plot(df[tcol], df['Tool wear [min]'], marker='o', linestyle='-')
+        ax.set_title("Tool wear over time")
+        ax.set_ylabel("Tool wear [min]")
+        ax.set_xlabel(tcol)
+        st.pyplot(fig)
+    else:
+        st.info("No 'Tool wear [min]' found to chart.")
+
+# ====== LAYOUT / SIDEBAR ======
 st.sidebar.header("⚙️ Select Model Type")
 mode = st.sidebar.radio("Choose Model:", ["Classification – Machine Failure", "Regression – MTBF (Time to Failure)"])
 
-# ====== 4️⃣ USER INPUT FORM ======
-st.sidebar.header("🔧 Input Machine Parameters")
+# Determine features for forms
+features_cls = ARTS.get('features_cls') or []
+features_reg = ARTS.get('features_reg') or []
 
-def user_input_features(features):
-    input_data = {}
-    for col in features:
-        input_data[col] = st.sidebar.number_input(f"{col}", step=0.01)
-    return pd.DataFrame([input_data])
+# Build input form based on selection
+if mode.startswith("Classification"):
+    X_input = build_input_form(features_cls, clean_df=ARTS.get('clean_data'))
+else:
+    X_input = build_input_form(features_reg, clean_df=ARTS.get('clean_data'))
+
+# ====== MAIN PANEL: Model performance + Features ======
+st.sidebar.markdown("---")
+if st.sidebar.button("Show model performance"):
+    st.subheader("📈 Model performance")
+    # Try show metrics from clean_data if present
+    df = ARTS.get('clean_data')
+    clf = ARTS.get('clf')
+    reg = ARTS.get('reg')
+    if df is not None:
+        test_df = None
+        if 'split' in df.columns:
+            test_df = df[df['split']=='test']
+        # fallback: if no explicit split, user can upload a test CSV later
+        if test_df is not None:
+            with st.expander("Show test set head"):
+                st.dataframe(test_df.head(10))
+            # classification metrics if available
+            if clf and features_cls and 'Machine failure' in test_df.columns:
+                X_test_cls = test_df[features_cls]
+                y_test_cls = test_df['Machine failure']
+                y_pred = clf.predict(X_test_cls)
+                y_proba = clf.predict_proba(X_test_cls)[:,1] if hasattr(clf, "predict_proba") else None
+                f1 = f1_score(y_test_cls, y_pred, zero_division=0)
+                pr_auc = average_precision_score(y_test_cls, y_proba) if y_proba is not None else None
+                st.write("**Classification**")
+                st.write(f"- F1 (test): **{f1:.3f}**")
+                if pr_auc is not None:
+                    st.write(f"- PR-AUC (test): **{pr_auc:.3f}**")
+                cm = confusion_matrix(y_test_cls, y_pred)
+                fig, ax = plt.subplots()
+                im = ax.imshow(cm, cmap="Blues")
+                ax.set_xlabel("Predicted"); ax.set_ylabel("Actual")
+                for (i, j), v in np.ndenumerate(cm):
+                    ax.text(j, i, f"{v}", ha='center', va='center', color='white' if v>cm.max()/2 else 'black')
+                st.pyplot(fig)
+            # regression metrics
+            if reg and features_reg and 'Tool wear [min]' in test_df.columns:
+                X_test_reg = test_df[features_reg]
+                y_test_reg = test_df['Tool wear [min]']
+                y_pred_reg = reg.predict(X_test_reg)
+                mae = mean_absolute_error(y_test_reg, y_pred_reg)
+                rmse = mean_squared_error(y_test_reg, y_pred_reg, squared=False)
+                r2 = r2_score(y_test_reg, y_pred_reg)
+                st.write("**Regression (MTBF)**")
+                st.write(f"- MAE (test): **{mae:.2f}** minutes")
+                st.write(f"- RMSE (test): **{rmse:.2f}** minutes")
+                st.write(f"- R² (test): **{r2:.3f}**")
+        else:
+            st.info("No explicit test split found inside clean_data.csv. To show metrics upload a test CSV or include a 'split' column in clean_data.csv.")
+    else:
+        st.info("No clean_data.csv found in artifacts — upload a test CSV to compute metrics here.")
+
+# ====== PREDICTION PANEL ======
+st.markdown("## 🔍 Prediction")
 
 if mode.startswith("Classification"):
-    st.subheader("Model: Machine Failure Prediction")
-    st.write("Predict whether a failure will occur within 30 days under given conditions.")
-    X_input = user_input_features(features_cls)
-
+    st.subheader("🟠 Classification – Will failure occur within 30 days?")
+    st.write("Enter current machine parameters and press Predict Failure.")
     if st.button("🔍 Predict Failure"):
-        model = models["classifier"]
-        pred_proba = model.predict_proba(X_input)[0][1]
-        pred_class = model.predict(X_input)[0]
-        st.metric("Failure Probability (%)", f"{pred_proba*100:.2f}")
-        st.write("Predicted Class:", "⚠️ Failure" if pred_class==1 else "✅ No Failure")
+        model = ARTS.get('clf')
+        if model is None:
+            st.error("Classifier model not loaded.")
+        else:
+            try:
+                # ensure same column order
+                X_in = X_input[features_cls]
+                # predict
+                pred_proba = model.predict_proba(X_in)[0][1] if hasattr(model, "predict_proba") else None
+                pred_class = model.predict(X_in)[0]
+                if pred_proba is not None:
+                    st.metric("Failure Probability (%)", f"{pred_proba*100:.2f}")
+                else:
+                    st.write("Predicted class:", pred_class)
+                st.write("Predicted Class:", "⚠️ Failure" if pred_class==1 else "✅ No Failure")
+                show_prediction_note_cls(pred_proba if pred_proba is not None else 0.0, pred_class)
+            except Exception as e:
+                st.error(f"Prediction error: {e}")
 
-        st.write("---")
-        st.write("### 🔎 Feature Importances")
-        st.bar_chart(imp_cls)
+    st.write("---")
+    st.write("### 🔎 Feature Importances (Classification)")
+    plot_feature_importances(ARTS.get('imp_cls'), title="Classifier feature importances")
+
+    # CSV batch
+    st.write("---")
+    st.subheader("📤 Batch predictions (classification)")
+    uploaded_file = st.file_uploader("Upload CSV with feature columns", type=["csv"], key="cls_batch")
+    if st.button("Run batch classification"):
+        batch_predict_and_download(ARTS.get('clf'), features_cls, uploaded_file, is_classification=True)
 
 else:
-    st.subheader("Model: MTBF Regression – Time Until Failure")
-    st.write("Predict estimated time (minutes) before machine failure.")
-    X_input = user_input_features(features_reg)
-
+    st.subheader("🔵 Regression – Estimated time until failure (MTBF)")
+    st.write("Enter current machine parameters and press Predict MTBF.")
     if st.button("⏱️ Predict MTBF"):
-        model = models["regressor"]
-        prediction = model.predict(X_input)[0]
-        st.metric("Estimated Time to Failure (minutes)", f"{prediction:.2f}")
+        model = ARTS.get('reg')
+        if model is None:
+            st.error("Regression model not loaded.")
+        else:
+            try:
+                X_in = X_input[features_reg]
+                prediction = model.predict(X_in)[0]
+                st.metric("Estimated Time to Failure (minutes)", f"{prediction:.2f}")
+                show_prediction_note_reg(prediction)
+            except Exception as e:
+                st.error(f"Prediction error: {e}")
 
-        st.write("---")
-        st.write("### 🔎 Feature Importances")
-        st.bar_chart(imp_reg)
+    st.write("---")
+    st.write("### 🔎 Feature Importances (Regression)")
+    plot_feature_importances(ARTS.get('imp_reg'), title="Regression feature importances")
 
-# ====== 5️⃣ FOOTER ======
+    st.write("---")
+    st.subheader("📤 Batch predictions (regression)")
+    uploaded_file_reg = st.file_uploader("Upload CSV with feature columns", type=["csv"], key="reg_batch")
+    if st.button("Run batch regression"):
+        batch_predict_and_download(ARTS.get('reg'), features_reg, uploaded_file_reg, is_classification=False)
+
+# ====== TRENDS & HISTORY ======
 st.markdown("---")
-st.caption("Built in python using Streamlit, Scikit-learn, PyCaret, and Machine Learning concepts")
+st.subheader("📊 Historical trends (if available)")
+show_trends_if_available(ARTS.get('clean_data'))
+
+# ====== FOOTER ======
+st.markdown("---")
+st.caption("© 2025 Juan Díaz — Predictive Maintenance Dashboard | Built with Streamlit & Scikit-learn")
