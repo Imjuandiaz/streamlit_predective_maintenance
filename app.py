@@ -100,26 +100,53 @@ def plot_feature_importances(df_imp, title="Feature importances"):
     plt.tight_layout()
     st.pyplot(fig)
 
+# CodeSnippet UPDATE_RANGES
+# Replace the previous infer_ranges_from_df with this version that uses explicit defaults when provided.
+DEFAULT_RANGES = {
+    "Air temperature [K]":      (295.0, 305.0),
+    "Process temperature [K]":  (305.0, 315.0),
+    "Rotational speed [rpm]":  (1150.0, 2900.0),
+    "Torque [Nm]":             (3.8, 77.0),
+    "Tool wear [min]":         (0.0, 260.0),
+    "Temp_diff":               (7.6, 13.0),
+    "Wear_per_torque":         (0.0, 40.0)
+}
+
 def infer_ranges_from_df(clean_df, features):
+    """
+    Returns a dict: feature -> (min, max, step, default)
+    Uses DEFAULT_RANGES when available; otherwise tries to infer from clean_df;
+    otherwise uses reasonable fallbacks.
+    """
     ranges = {}
-    if clean_df is None:
-        # some sensible defaults
-        for f in features:
-            ranges[f] = (0.0, 100.0, 0.1, 0.0)  # min,max,step,default
-        return ranges
     for f in features:
-        if f in clean_df.columns:
-            col = clean_df[f].dropna().astype(float)
-            if len(col)>0:
-                mn, mx = float(col.min()), float(col.max())
-                step = max((mx-mn)/100.0, 0.01)
-                default = float(col.median())
-                ranges[f] = (mn, mx, step, default)
-            else:
-                ranges[f] = (0.0, 100.0, 0.1, 0.0)
-        else:
-            ranges[f] = (0.0, 100.0, 0.1, 0.0)
+        # 1) If we have an explicit default range, use it
+        if f in DEFAULT_RANGES:
+            mn, mx = DEFAULT_RANGES[f]
+            step = max((mx - mn) / 100.0, 0.01)
+            default = float((mn + mx) / 2.0)
+            ranges[f] = (mn, mx, step, default)
+            continue
+
+        # 2) Try infer from clean_df if provided
+        if clean_df is not None and f in clean_df.columns:
+            try:
+                col = clean_df[f].dropna().astype(float)
+                if len(col) > 0:
+                    mn, mx = float(col.min()), float(col.max())
+                    step = max((mx - mn) / 100.0, 0.01)
+                    default = float(col.median())
+                    ranges[f] = (mn, mx, step, default)
+                    continue
+            except Exception:
+                pass
+
+        # 3) Fallback generic values
+        ranges[f] = (0.0, 100.0, 0.1, 0.0)
+
     return ranges
+# End CodeSnippet UPDATE_RANGES
+
 
 def build_input_form(features, clean_df=None):
     st.sidebar.header("🔧 Input parameters")
