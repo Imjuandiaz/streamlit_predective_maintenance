@@ -79,26 +79,108 @@ def load_artifacts():
 ARTS = load_artifacts()
 
 # ====== HELPERS ======
-def plot_feature_importances(df_imp, title="Feature importances"):
-    if df_imp is None:
-        st.write("No feature importances found.")
-        return
-    # ensure series
-    if isinstance(df_imp, pd.DataFrame):
-        try:
-            ser = df_imp.iloc[:,0]
-        except Exception:
-            ser = pd.Series(df_imp.values.flatten(), index=df_imp.index)
+# ====== NEW HELPERS: metrics display & test loader ======
+from sklearn.metrics import accuracy_score
+
+def load_test_df_from_artifacts(clean_df, features, target_col):
+    """
+    Try to extract a test DataFrame from clean_data.csv using 'split'=='test'.
+    Returns (X_test, y_test) or (None, None) if not available.
+    """
+    if clean_df is None:
+        return None, None
+    if 'split' in clean_df.columns:
+        test_df = clean_df[clean_df['split'] == 'test']
     else:
-        ser = pd.Series(df_imp)
-    ser = ser.sort_values(ascending=True)
-    fig, ax = plt.subplots(figsize=(6, max(3, 0.3*len(ser))))
-    ser.plot(kind='barh', ax=ax)
-    ax.set_title(title)
-    ax.set_xlabel("Importance")
-    ax.grid(axis='x', linestyle='--', alpha=0.4)
-    plt.tight_layout()
-    st.pyplot(fig)
+        return None, None
+    # check target
+    if target_col not in test_df.columns:
+        return None, None
+    # ensure features exist
+    missing = [c for c in features if c not in test_df.columns]
+    if missing:
+        return None, None
+    X_test = test_df[features].copy()
+    y_test = test_df[target_col].copy()
+    # coerce numeric and fill na
+    X_test = X_test.apply(pd.to_numeric, errors='coerce').fillna(X_test.median().fillna(0.0))
+    y_test = pd.to_numeric(y_test, errors='coerce').fillna(0)
+    return X_test, y_test
+
+def compute_and_display_classification_metrics(clf, features, clean_df):
+    # 1) try from artifacts
+    X_test, y_test = load_test_df_from_artifacts(clean_df, features, 'Machine failure')
+    # 2) fallback: allow upload
+    if X_test is None or y_test is None:
+        st.info("No test split found in clean_data.csv. You can upload a test CSV to compute Classification metrics.")
+        uploaded = st.file_uploader("Upload test CSV for classification metrics", type=["csv"], key="cls_metrics")
+        if uploaded is not None:
+            try:
+                df_test = pd.read_csv(uploaded)
+                missing = [c for c in features if c not in df_test.columns]
+                if missing:
+                    st.error(f"Uploaded CSV missing required features: {missing}")
+                    return
+                if 'Machine failure' not in df_test.columns:
+                    st.error("Uploaded CSV must include 'Machine failure' column.")
+                    return
+                X_test = df_test[features].apply(pd.to_numeric, errors='coerce').fillna(df_test[features].median().fillna(0.0))
+                y_test = pd.to_numeric(df_test['Machine failure'], errors='coerce').fillna(0)
+            except Exception as e:
+                st.error(f"Error reading uploaded CSV: {e}")
+                return
+    if X_test is None or y_test is None:
+        return  # nothing to show
+    # predictions
+    try:
+        y_pred = clf.predict(X_test)
+    except Exception as e:
+        st.error(f"Error predicting on test set: {e}")
+        return
+    acc = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+    st.write("**Classification metrics (test)**")
+    st.write(f"- Accuracy: **{acc:.3f}**")
+    st.write(f"- F1 score: **{f1:.3f}**")
+    # show small report if desired
+    with st.expander("Show classification report"):
+        st.text(classification_report(y_test, y_pred, zero_division=0))
+
+def compute_and_display_regression_metrics(reg, features, clean_df):
+    X_test, y_test = load_test_df_from_artifacts(clean_df, features, 'Tool wear [min]')
+    if X_test is None or y_test is None:
+        st.info("No test split found in clean_data.csv. You can upload a test CSV to compute Regression metrics.")
+        uploaded = st.file_uploader("Upload test CSV for regression metrics", type=["csv"], key="reg_metrics")
+        if uploaded is not None:
+            try:
+                df_test = pd.read_csv(uploaded)
+                missing = [c for c in features if c not in df_test.columns]
+                if missing:
+                    st.error(f"Uploaded CSV missing required features: {missing}")
+                    return
+                if 'Tool wear [min]' not in df_test.columns:
+                    st.error("Uploaded CSV must include 'Tool wear [min]' column.")
+                    return
+                X_test = df_test[features].apply(pd.to_numeric, errors='coerce').fillna(df_test[features].median().fillna(0.0))
+                y_test = pd.to_numeric(df_test['Tool wear [min]'], errors='coerce').fillna(0)
+            except Exception as e:
+                st.error(f"Error reading uploaded CSV: {e}")
+                return
+    if X_test is None or y_test is None:
+        return
+    try:
+        y_pred = reg.predict(X_test)
+    except Exception as e:
+        st.error(f"Error predicting on test set: {e}")
+        return
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = mean_squared_error(y_test, y_pred, squared=False)
+    r2 = r2_score(y_test, y_pred)
+    st.write("**Regression metrics (test)**")
+    st.write(f"- MAE: **{mae:.2f}** minutes")
+    st.write(f"- RMSE: **{rmse:.2f}** minutes")
+    st.write(f"- R²: **{r2:.3f}**")
+
 
 # CodeSnippet UPDATE_RANGES
 # Replace the previous infer_ranges_from_df with this version that uses explicit defaults when provided.
