@@ -1,5 +1,3 @@
-
-
 # app_enhanced.py
 # Predictive Maintenance Dashboard - Enhanced version
 # By Juan Díaz (enhanced)
@@ -314,25 +312,33 @@ if st.sidebar.button("Show model performance"):
     clf = ARTS.get('clf')
     reg = ARTS.get('reg')
     if df is not None:
-        test_df = None
+        # Use test split if exists, otherwise fallback to using the whole dataset
         if 'split' in df.columns:
-            test_df = df[df['split']=='test']
-        # fallback: if no explicit split, user can upload a test CSV later
-        if test_df is not None:
-            with st.expander("Show test set head"):
-                st.dataframe(test_df.head(10))
-            # classification metrics if available
-            if clf and features_cls and 'Machine failure' in test_df.columns:
-                X_test_cls = test_df[features_cls]
-                y_test_cls = test_df['Machine failure']
+            test_df = df[df['split'] == 'test']
+        else:
+            test_df = df.copy()
+
+        with st.expander("Show dataset head"):
+            st.dataframe(test_df.head(10))
+
+        # ===== CLASSIFICATION METRICS =====
+        if clf and features_cls and 'Machine failure' in test_df.columns:
+            try:
+                X_test_cls = test_df[features_cls].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+                y_test_cls = test_df['Machine failure'].astype(int)
                 y_pred = clf.predict(X_test_cls)
                 y_proba = clf.predict_proba(X_test_cls)[:,1] if hasattr(clf, "predict_proba") else None
+
+                acc = accuracy_score(y_test_cls, y_pred)
                 f1 = f1_score(y_test_cls, y_pred, zero_division=0)
-                pr_auc = average_precision_score(y_test_cls, y_proba) if y_proba is not None else None
+
                 st.write("**Classification**")
+                st.write(f"- Accuracy (test): **{acc*100:.2f}%**")
                 st.write(f"- F1 (test): **{f1:.3f}**")
-                if pr_auc is not None:
+                if y_proba is not None:
+                    pr_auc = average_precision_score(y_test_cls, y_proba)
                     st.write(f"- PR-AUC (test): **{pr_auc:.3f}**")
+
                 cm = confusion_matrix(y_test_cls, y_pred)
                 fig, ax = plt.subplots()
                 im = ax.imshow(cm, cmap="Blues")
@@ -340,20 +346,43 @@ if st.sidebar.button("Show model performance"):
                 for (i, j), v in np.ndenumerate(cm):
                     ax.text(j, i, f"{v}", ha='center', va='center', color='white' if v>cm.max()/2 else 'black')
                 st.pyplot(fig)
-            # regression metrics
-            if reg and features_reg and 'Tool wear [min]' in test_df.columns:
-                X_test_reg = test_df[features_reg]
-                y_test_reg = test_df['Tool wear [min]']
-                y_pred_reg = reg.predict(X_test_reg)
-                mae = mean_absolute_error(y_test_reg, y_pred_reg)
-                rmse = mean_squared_error(y_test_reg, y_pred_reg, squared=False)
-                r2 = r2_score(y_test_reg, y_pred_reg)
-                st.write("**Regression (MTBF)**")
-                st.write(f"- MAE (test): **{mae:.2f}** minutes")
-                st.write(f"- RMSE (test): **{rmse:.2f}** minutes")
-                st.write(f"- R² (test): **{r2:.3f}**")
+
+            except Exception as e:
+                st.error("Error computing classification metrics: " + str(e))
         else:
-            st.info("No explicit test split found inside clean_data.csv. To show metrics upload a test CSV or include a 'split' column in clean_data.csv.")
+            st.info("Classification metrics unavailable (need 'Machine failure' column and classifier loaded).")
+
+        # ===== REGRESSION METRICS =====
+        if reg and features_reg and 'Tool wear [min]' in test_df.columns:
+            try:
+                X_test_reg = test_df[features_reg].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+                y_test_reg = pd.to_numeric(test_df['Tool wear [min]'], errors='coerce')
+                mask = ~y_test_reg.isna()
+                if mask.sum() > 0:
+                    y_pred_reg = reg.predict(X_test_reg[mask])
+                    mae = mean_absolute_error(y_test_reg[mask], y_pred_reg)
+                    rmse = mean_squared_error(y_test_reg[mask], y_pred_reg, squared=False)
+                    r2 = r2_score(y_test_reg[mask], y_pred_reg)
+                    st.write("**Regression (MTBF)**")
+                    st.write(f"- MAE (test): **{mae:.2f}** minutes")
+                    st.write(f"- RMSE (test): **{rmse:.2f}** minutes")
+                    st.write(f"- R² (test): **{r2:.3f}**")
+                    # Plot predicted vs actual
+                    fig, ax = plt.subplots()
+                    ax.scatter(y_test_reg[mask], y_pred_reg)
+                    ax.plot([y_test_reg[mask].min(), y_test_reg[mask].max()],
+                            [y_test_reg[mask].min(), y_test_reg[mask].max()], '--')
+                    ax.set_xlabel("Actual")
+                    ax.set_ylabel("Predicted")
+                    ax.set_title("Prediction vs Actual")
+                    st.pyplot(fig)
+                else:
+                    st.info("Tool wear column found but contains no valid numeric values to compute regression metrics.")
+            except Exception as e:
+                st.error("Error computing regression metrics: " + str(e))
+        else:
+            st.info("Regression metrics unavailable (need 'Tool wear [min]' column and regressor loaded).")
+
     else:
         st.info("No clean_data.csv found in artifacts — upload a test CSV to compute metrics here.")
 
