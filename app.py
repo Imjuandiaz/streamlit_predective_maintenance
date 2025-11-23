@@ -89,26 +89,132 @@ DEFAULT_RANGES = {
     "Wear_per_torque": (0,40)
 }
 
+# --- REPLACE infer_ranges_from_df and build_input_form WITH THIS SAFER VERSION ---
+
+def _is_integer_like(x):
+    """Return True if x is integer-like (e.g. 100.0 or 100 or numpy 100)."""
+    try:
+        # convert to float first (handles numpy types)
+        fx = float(x)
+        return fx.is_integer()
+    except Exception:
+        return False
+
+def _to_python_number(x, prefer_int=False):
+    """Convert numpy numbers to python int/float. If prefer_int True and x is integer-like return int."""
+    # protect from None / nan
+    try:
+        if x is None:
+            return None
+        # convert numpy types to Python scalars
+        if isinstance(x, (np.generic,)):
+            x = x.item()
+        # Now decide int/float
+        if prefer_int and _is_integer_like(x):
+            return int(round(float(x)))
+        # default float
+        return float(x)
+    except Exception:
+        return None
+
 def infer_ranges_from_df(clean_df, features):
+    """
+    Safer range inference:
+    returns dict feature -> (mn, mx, step, default) where mn/mx/step/default are python numbers (int or float)
+    """
     ranges = {}
     for f in features:
+        # 1) If we have explicit defaults (DEFAULT_RANGES) use them and cast properly
         if f in DEFAULT_RANGES:
-            mn,mx = DEFAULT_RANGES[f]
-            step = max((mx-mn)/100,0.01)
-            ranges[f]=(mn,mx,step,(mn+mx)/2)
-        else:
-            ranges[f]=(0,100,0.1,0)
+            mn_raw, mx_raw = DEFAULT_RANGES[f]
+            # decide if integer-like
+            prefer_int = _is_integer_like(mn_raw) and _is_integer_like(mx_raw)
+            mn = _to_python_number(mn_raw, prefer_int=prefer_int)
+            mx = _to_python_number(mx_raw, prefer_int=prefer_int)
+            # step: choose int step if integer-like range, else float step
+            if prefer_int:
+                step = max(int(round((mx - mn) / 100.0)) or 1, 1)
+                default = int(round((mn + mx) / 2.0))
+            else:
+                step = max((mx - mn) / 100.0, 0.01)
+                default = (mn + mx) / 2.0
+            ranges[f] = (mn, mx, step, default)
+            continue
+
+        # 2) Try infer from clean_df
+        if clean_df is not None and f in clean_df.columns:
+            try:
+                col = pd.to_numeric(clean_df[f].dropna(), errors='coerce')
+                col = col[~col.isna()]
+                if len(col) > 0:
+                    mn_raw = float(col.min())
+                    mx_raw = float(col.max())
+                    prefer_int = _is_integer_like(mn_raw) and _is_integer_like(mx_raw)
+                    mn = _to_python_number(mn_raw, prefer_int=prefer_int)
+                    mx = _to_python_number(mx_raw, prefer_int=prefer_int)
+                    if prefer_int:
+                        step = max(int(round((mx - mn) / 100.0)) or 1, 1)
+                        default = int(round(float(col.median())))
+                    else:
+                        step = max((mx - mn) / 100.0, 0.01)
+                        default = float(col.median())
+                    ranges[f] = (mn, mx, step, default)
+                    continue
+            except Exception:
+                pass
+
+        # 3) Generic fallback (float)
+        ranges[f] = (0.0, 100.0, 0.1, 0.0)
+
     return ranges
 
+
 def build_input_form(features, clean_df=None):
+    """
+    Builds the sidebar input form, but enforces consistent numeric types for Streamlit number_input.
+    """
     st.sidebar.header("🔧 Input parameters")
     inputs = {}
     ranges = infer_ranges_from_df(clean_df, features)
+
     for feat in features:
-        mn,mx,step,default = ranges[feat]
-        val = st.sidebar.number_input(f"{feat} ({mn}–{mx})", min_value=mn, max_value=mx, value=default, step=step, format="%.3f")
-        inputs[feat]=val
+        mn, mx, step, default = ranges.get(feat, (0.0, 100.0, 0.1, 0.0))
+
+        # Ensure python native types
+        # Decide if this field should be integer (all values integer-like)
+        prefer_int = _is_integer_like(mn) and _is_integer_like(mx) and _is_integer_like(default) and _is_integer_like(step)
+        if prefer_int:
+            mn_py = _to_python_number(mn, prefer_int=True)
+            mx_py = _to_python_number(mx, prefer_int=True)
+            step_py = int(_to_python_number(step, prefer_int=True)) if step is not None else 1
+            default_py = _to_python_number(default, prefer_int=True)
+            # final safe fallback
+            if mn_py is None: mn_py = 0
+            if mx_py is None: mx_py = mn_py + 100
+            if default_py is None: default_py = mn_py
+            try:
+                val = st.sidebar.number_input(f"{feat} ({mn_py}–{mx_py})", min_value=int(mn_py), max_value=int(mx_py), value=int(default_py), step=int(step_py), format="%d")
+            except Exception as e:
+                # fallback to float-safe input
+                val = st.sidebar.number_input(f"{feat} ({mn_py}–{mx_py})", min_value=float(mn_py), max_value=float(mx_py), value=float(default_py), step=float(step_py), format="%.3f")
+        else:
+            mn_py = _to_python_number(mn, prefer_int=False) or 0.0
+            mx_py = _to_python_number(mx, prefer_int=False) or 100.0
+            step_py = _to_python_number(step, prefer_int=False) or 0.1
+            default_py = _to_python_number(default, prefer_int=False) if default is not None else (mn_py + mx_py) / 2.0
+            # final safe fallback
+            if mn_py >= mx_py:
+                mx_py = mn_py + abs(mn_py) + 1.0
+            try:
+                val = st.sidebar.number_input(f"{feat} ({mn_py:.3f}–{mx_py:.3f})", min_value=mn_py, max_value=mx_py, value=default_py, step=step_py, format="%.3f")
+            except Exception as e:
+                # last-resort coerce to simple float range
+                val = st.sidebar.number_input(f"{feat}", value=float(default_py), step=0.1, format="%.3f")
+
+        inputs[feat] = val
+
     return pd.DataFrame([inputs])
+
 
 
 # ========= SIDEBAR =========
