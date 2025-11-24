@@ -222,7 +222,7 @@ def batch_predict_and_download(model, features, uploaded_file, is_classification
         return
 
     # Limit large files for safety
-    MAX_ROWS = 20000
+    MAX_ROWS = 90000
     if len(df) > MAX_ROWS:
         st.warning(f"CSV has {len(df)} rows. Processing first {MAX_ROWS} rows only.")
         df = df.iloc[:MAX_ROWS].copy()
