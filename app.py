@@ -185,7 +185,7 @@ def build_input_form(features, clean_df=None):
 def show_prediction_note_reg(pred_minutes):
     hours = pred_minutes/60.0
     days = pred_minutes/1440.0
-    st.markdown("### 📘 Interpretación de la predicción (Regresión)")
+    st.markdown("### 📘 Prediction Interpretation (Regression)")
     st.write(f"- Estimated time until failure: **{pred_minutes:.1f} minutes** ({hours:.1f} hours, {days:.2f} days).")
     mean = max(pred_minutes, 1.0)
     t_points = np.array([60, 60*24, 60*24*7])
@@ -194,10 +194,10 @@ def show_prediction_note_reg(pred_minutes):
     st.write(f"  - After 1 hour: {probs[0]*100:.1f}%")
     st.write(f"  - After 1 day: {probs[1]*100:.1f}%")
     st.write(f"  - After 7 days: {probs[2]*100:.1f}%")
-    st.caption("Nota: esto es una aproximación simple. Para curvas de supervivencia precisas hay que modelar tiempos históricos.")
+    st.caption("Note: this is a simple approximation. For precise survival curves, historical time modeling is required.")
 
 def show_prediction_note_cls(prob_pos, pred_class):
-    st.markdown("### 📘 Interpretación de la predicción (Clasificación)")
+    st.markdown("### 📘 Prediction Interpretation (Classification)")
     st.write(f"- Predicted class: **{'Failure' if pred_class==1 else 'No Failure'}**")
     st.write(f"- Probability of failure: **{prob_pos*100:.2f}%**")
     if prob_pos >= 0.7:
